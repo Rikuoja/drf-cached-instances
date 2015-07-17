@@ -56,7 +56,7 @@ class BaseCache(object):
 
     def model_function(self, model_name, version, func_name):
         """Return the model-specific caching function."""
-        assert func_name in ('serializer', 'loader', 'invalidator')
+        assert func_name in ('serializer', 'loader', 'invalidator', 'serializer_class')
         name = "%s_%s_%s" % (model_name.lower(), version, func_name)
         return getattr(self, name)
 
@@ -132,9 +132,18 @@ class BaseCache(object):
                 if not obj:
                     loader = self.model_function(model_name, version, 'loader')
                     obj = loader(obj_pk)
+                try:
+                    serializer_class = self.model_function(
+                        model_name, version, 'serializer_class')
+                except AttributeError:
+                    serializer_class = None
                 serializer = self.model_function(
                     model_name, version, 'serializer')
-                obj_native = serializer(obj) or {}
+                if serializer_class:
+                    # If the class is provided, it overrides the native serializer:
+                    obj_native = serializer_class.to_representation(obj) or {}
+                else:
+                    obj_native = serializer(obj) or {}
                 if obj_native:
                     cache_to_set[obj_key] = json.dumps(obj_native)
 
@@ -176,6 +185,10 @@ class BaseCache(object):
         versions = [version] if version else self.versions
         invalid = []
         for version in versions:
+            try:
+                serializer_class = self.model_function(model_name, version, 'serializer_class')
+            except AttributeError:
+                serializer_class = None
             serializer = self.model_function(model_name, version, 'serializer')
             loader = self.model_function(model_name, version, 'loader')
             invalidator = self.model_function(
@@ -200,7 +213,11 @@ class BaseCache(object):
                 if update_only and current_raw is None:
                     new = None
                 else:
-                    new = serializer(instance)
+                    if serializer_class:
+                        # If the class is provided, it overrides the native serializer:
+                        new = serializer_class.to_representation(instance)
+                    else:
+                        new = serializer(instance)
                 deleted = not instance
 
                 # If cache is invalid, update cache
