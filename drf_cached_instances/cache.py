@@ -134,16 +134,19 @@ class BaseCache(object):
                     obj = loader(obj_pk)
                 try:
                     serializer_class = self.model_function(
-                        model_name, version, 'serializer_class')
+                        model_name, version, 'serializer_class')()
                 except AttributeError:
                     serializer_class = None
-                serializer = self.model_function(
-                    model_name, version, 'serializer')
+                try:
+                    serializer = self.model_function(
+                        model_name, version, 'serializer')
+                except AttributeError:
+                    serializer = None
                 if serializer_class:
                     # If the class is provided, it overrides the native serializer:
-                    obj_native = serializer_class.to_representation(obj) or {}
-                else:
-                    obj_native = serializer(obj) or {}
+                    serializer = serializer_class.to_representation
+                assert serializer
+                obj_native = serializer(obj) or {}
                 if obj_native:
                     cache_to_set[obj_key] = json.dumps(obj_native)
 
@@ -156,7 +159,12 @@ class BaseCache(object):
                 obj_native[name] = value
 
             if obj_native:
+                # Reconstructing the object from the serialization
+                if serializer_class:
+                    # Rename the fields according to the sources in serializer
+                    pass
                 ret[(model_name, obj_pk)] = (obj_native, obj_key, obj)
+                print(str(ret))
 
         # Save any new cached representations
         if cache_to_set and self.cache:
@@ -186,14 +194,20 @@ class BaseCache(object):
         invalid = []
         for version in versions:
             try:
-                serializer_class = self.model_function(model_name, version, 'serializer_class')
+                serializer_class = self.model_function(model_name, version, 'serializer_class')()
             except AttributeError:
                 serializer_class = None
-            serializer = self.model_function(model_name, version, 'serializer')
+            try:
+                serializer = self.model_function(model_name, version, 'serializer')
+            except AttributeError:
+                serializer = None
+            if serializer_class:
+                # If the class is provided, it overrides the native serializer:
+                serializer = serializer_class.to_representation
             loader = self.model_function(model_name, version, 'loader')
             invalidator = self.model_function(
                 model_name, version, 'invalidator')
-            if serializer is None and loader is None and invalidator is None:
+            if serializer is None and serializer_class is None and loader is None and invalidator is None:
                 continue
 
             if self.cache is None:
@@ -213,11 +227,7 @@ class BaseCache(object):
                 if update_only and current_raw is None:
                     new = None
                 else:
-                    if serializer_class:
-                        # If the class is provided, it overrides the native serializer:
-                        new = serializer_class.to_representation(instance)
-                    else:
-                        new = serializer(instance)
+                    new = serializer(instance)
                 deleted = not instance
 
                 # If cache is invalid, update cache

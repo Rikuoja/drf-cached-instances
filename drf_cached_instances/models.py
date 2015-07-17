@@ -64,11 +64,13 @@ class CachedModel(object):
     def __init__(self, model, data):
         """Initialize a CachedModel."""
         self._model = model
+        # print(model.objects.values())
         self._data = data
 
     def __getattr__(self, name):
         """Return an attribute from the cached data."""
         if name in self._data:
+            # print("Name " + str(name) + ", Data " + str(self._data[name]))
             return self._data[name]
         elif name == 'pk':
             return self._data.get(self._model._meta.pk.attname)
