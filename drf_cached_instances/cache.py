@@ -1,12 +1,14 @@
 """BaseCache for foundation of app-specific caching strategy."""
 
 from calendar import timegm
+from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pytz import utc
 import json
 
 from django.conf import settings
 from django.db.models.loading import get_model
+from rest_framework.serializers import BaseSerializer
 
 from .models import PkOnlyModel, PkOnlyQueryset
 
@@ -81,6 +83,46 @@ class BaseCache(object):
         from_json = self.field_function(type_code, 'from_json')
         value = from_json(json_value)
         return key, value
+
+    def serialization_using_source_names(self, serialization, serializer):
+        """Recreates the serialization OrderedDict with keys renamed according to
+        source as required by the accompanied serializer.
+        """
+        # OrderedDict keys are immutable, so we have to reconstruct the serialization
+        print("The serializer is " + str(serializer))
+        print("The serialization is " + str(serialization))
+
+        ret = []
+        if not isinstance(serialization, list):
+            # always encapsulate the serializer in a list
+            serialization_list = [serialization]
+        else:
+            # if the serialization is a list, find the child serializer
+            serialization_list = serialization
+            serializer = serializer.child
+        for ser in serialization_list:
+            # The new serialization will be in the same order
+            new_ser = OrderedDict()
+            for name, field in list(ser.items()):
+                print(str(name) + " had the field " + str(field))
+
+                # If the field was produced by a serializer, we must traverse it
+                if isinstance(serializer.fields[name], BaseSerializer):
+                    field = self.serialization_using_source_names(field, serializer.fields[name])
+
+                source = serializer.fields[name].source
+                # If the field is url, its source is *
+                if source is not '*':
+                    # This is the magic line
+                    name = source
+                print(str(name) + " now has the field " + str(field))
+                new_ser[name] = field
+            ret.append(new_ser)
+        # If the serialization was not a list, also returns a bare serialization
+        if not isinstance(serialization, list):
+            return ret[0]
+        else:
+            return ret
 
     def get_instances(self, object_specs, version=None):
         """Get the cached native representation for one or more objects.
@@ -159,12 +201,12 @@ class BaseCache(object):
                 obj_native[name] = value
 
             if obj_native:
-                # Reconstructing the object from the serialization
                 if serializer_class:
                     # Rename the fields according to the sources in serializer
-                    pass
+                    obj_native = self.serialization_using_source_names(obj_native, serializer_class)
+                # Reconstructing the object from the serialization
                 ret[(model_name, obj_pk)] = (obj_native, obj_key, obj)
-                print(str(ret))
+                print("Now the serialization is " + str(ret))
 
         # Save any new cached representations
         if cache_to_set and self.cache:
