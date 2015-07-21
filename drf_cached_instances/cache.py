@@ -8,9 +8,37 @@ import json
 
 from django.conf import settings
 from django.db.models.loading import get_model
-from rest_framework.serializers import BaseSerializer
+from rest_framework.serializers import BaseSerializer, PrimaryKeyRelatedField
+from rest_framework.relations import HyperlinkedRelatedField
 
 from .models import PkOnlyModel, PkOnlyQueryset
+
+
+def extend(obj, attr, attr_value):
+    """Returns a subclassed object with the added attribute."""
+    obj_type = type(obj)
+    falsey = False
+    if obj is None:
+        # NoneType singleton cannot be subclassed, create falsey object instead
+        # TODO: create a singleton, save all empty attributes to the same object?
+        obj_type = object
+        falsey = True
+
+    class extended(obj_type):
+        """A class for adding attributes to objects if required by the cache."""
+
+        def __init__(self, falsey):
+            setattr(self, 'falsey', falsey)
+            super().__init__
+
+        def extend(self, attribute, value):
+            setattr(self, attribute, value)
+            return self
+
+        def __bool__(self):
+            return not self.falsey
+
+    return extended(obj).extend(attr, attr_value)
 
 
 class BaseCache(object):
@@ -84,15 +112,32 @@ class BaseCache(object):
         value = from_json(json_value)
         return key, value
 
-    def serialization_using_source_names(self, serialization, serializer):
-        """Recreates the serialization OrderedDict with keys renamed according to
-        source as required by the accompanied serializer.
+    def value_with_attributes(self, name, value, field):
+        """Modify value so that it can be serialized by field.
+        """
+        # print("Field " + str(field) + " has the type " + str(type(field)) + " requiring special treatment")
+        if isinstance(field, BaseSerializer):
+            # This must work also if the field is ListSerializer
+            # If the value was produced by a serializer, we must traverse it
+            if value is not None:
+                return self.serialization_using_class(value, field)
+            return value
+        if isinstance(field, PrimaryKeyRelatedField):
+            # Primary key must be accessible by pk attribute
+            # print(str(name) + ".pk now also has the value " + str(value))
+            return extend(value, 'pk', value)
+        return value
+
+    def serialization_using_class(self, serialization, serializer):
+        """Recreates the serialization OrderedDict with sources defined
+        as required by the accompanied serializer, essentially mocking the db.
         """
         # OrderedDict keys are immutable, so we have to reconstruct the serialization
-        print("The serializer is " + str(serializer))
-        print("The serialization is " + str(serialization))
+        # print("The serializer is " + str(serializer))
+        # print("The serialization is " + str(serialization))
 
         ret = []
+
         if not isinstance(serialization, list):
             # always encapsulate the serializer in a list
             serialization_list = [serialization]
@@ -100,32 +145,56 @@ class BaseCache(object):
             # if the serialization is a list, find the child serializer
             serialization_list = serialization
             serializer = serializer.child
+
         for ser in serialization_list:
             # The new serialization will be in the same order
             new_ser = OrderedDict()
+
             for name, value in list(ser.items()):
-                print(str(name) + " had the value " + str(value))
+                # print(str(name) + " had the value " + str(value))
+
+                # Check if the value requires added attributes
                 try:
-                    if isinstance(serializer.fields[name], BaseSerializer):
-                        # If the value was produced by a serializer, we must traverse it
-                        if value is not None:
-                            value = self.serialization_using_source_names(value, serializer.fields[name])
-                    source = serializer.fields[name].source
+                    field = serializer.fields[name]
+                    value = self.value_with_attributes(name, value, field)
+                    source = field.source
+                    # print("Field is " + str(field) + ", value is " + str(value) + " and source is " + str(source))
                 except KeyError as key_error:
-                    # If the serialization was produced by rest_framework_gis, some fields may be absent
-                    if serializer.geo_fields:
-                        # Leave GeoModelSerializer generated fields untouched
-                        source = name
-                    else:
+                    # If the serialization was produced by rest_framework_gis, value may be absent
+                    try:
+                        # print("geo_fields is " + str(serializer.geo_fields))
+                        if serializer.geo_fields:
+                            # Leave GeoModelSerializer generated fields untouched
+                            field = None
+                            value = value
+                            source = name
+                    except AttributeError:
                         raise key_error
-                # If the value is url, its source is *
-                if source is not '*':
+                # Replace the names with the sources
+                if source is not '*':  # asterisk stands for reference to the model object itself
+                    # Sources with . must remain readable as is, but also contain the attribute
+                    source, delimiter, attribute = source.partition('.')
                     # This is the magic line
                     name = source
-                print(str(name) + " now has the value " + str(value))
+                    if attribute:
+                        # We have to piggyback the object with repeated data
+                        value = extend(value, attribute, value)
+                        # print(str(name) + '.' + str(attribute) + " now also has the value " + str(value))
+                if isinstance(field, HyperlinkedRelatedField):
+                    # url fields require their lookup_field to be added as object attribute
+                    if source is '*':
+                        # the field looks at the parent serializer for the object pk
+                        setattr(new_ser, field.lookup_field, ser['id'])
+                    else:
+                        # the field looks at the db for the external object pk, we parse it from url
+                        # print("The url is " + value + " and the pk is " + value.rsplit('/')[-2])
+                        value = extend(value, field.lookup_field, value.rsplit('/')[-2])
+
+                # print(str(name) + " now has the value " + str(value))
                 new_ser[name] = value
             ret.append(new_ser)
-        # If the serialization was not a list, also returns a bare serialization
+
+        # If the serialization was not a list, return a bare serialization
         if not isinstance(serialization, list):
             return ret[0]
         else:
@@ -172,6 +241,22 @@ class BaseCache(object):
         cache_to_set = {}
         for model_name, obj_pk, obj, obj_key in spec_keys:
 
+            # Get the right serializer
+            try:
+                serializer_class = self.model_function(
+                    model_name, version, 'serializer_class')()
+            except AttributeError:
+                serializer_class = None
+            try:
+                serializer = self.model_function(
+                    model_name, version, 'serializer')
+            except AttributeError:
+                serializer = None
+            if serializer_class:
+                # If the class is provided, it overrides the native serializer:
+                serializer = serializer_class.to_representation
+            assert serializer
+
             # Load cached objects
             obj_val = cache_vals.get(obj_key)
             obj_native = json.loads(obj_val) if obj_val else None
@@ -181,20 +266,6 @@ class BaseCache(object):
                 if not obj:
                     loader = self.model_function(model_name, version, 'loader')
                     obj = loader(obj_pk)
-                try:
-                    serializer_class = self.model_function(
-                        model_name, version, 'serializer_class')()
-                except AttributeError:
-                    serializer_class = None
-                try:
-                    serializer = self.model_function(
-                        model_name, version, 'serializer')
-                except AttributeError:
-                    serializer = None
-                if serializer_class:
-                    # If the class is provided, it overrides the native serializer:
-                    serializer = serializer_class.to_representation
-                assert serializer
                 obj_native = serializer(obj) or {}
                 if obj_native:
                     cache_to_set[obj_key] = json.dumps(obj_native)
@@ -207,13 +278,14 @@ class BaseCache(object):
                 assert name not in obj_native
                 obj_native[name] = value
 
+            # Native object found
             if obj_native:
                 if serializer_class:
-                    # Rename the fields according to the sources in serializer
-                    obj_native = self.serialization_using_source_names(obj_native, serializer_class)
+                    # Mock the db for the serialization class
+                    obj_native = self.serialization_using_class(obj_native, serializer_class)
                 # Reconstructing the object from the serialization
                 ret[(model_name, obj_pk)] = (obj_native, obj_key, obj)
-                print("Now the serialization is " + str(ret))
+                # print("Now the serialization is " + str(ret))
 
         # Save any new cached representations
         if cache_to_set and self.cache:
