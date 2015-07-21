@@ -103,20 +103,27 @@ class BaseCache(object):
         for ser in serialization_list:
             # The new serialization will be in the same order
             new_ser = OrderedDict()
-            for name, field in list(ser.items()):
-                print(str(name) + " had the field " + str(field))
-
-                # If the field was produced by a serializer, we must traverse it
-                if isinstance(serializer.fields[name], BaseSerializer):
-                    field = self.serialization_using_source_names(field, serializer.fields[name])
-
-                source = serializer.fields[name].source
-                # If the field is url, its source is *
+            for name, value in list(ser.items()):
+                print(str(name) + " had the value " + str(value))
+                try:
+                    if isinstance(serializer.fields[name], BaseSerializer):
+                        # If the value was produced by a serializer, we must traverse it
+                        if value is not None:
+                            value = self.serialization_using_source_names(value, serializer.fields[name])
+                    source = serializer.fields[name].source
+                except KeyError as key_error:
+                    # If the serialization was produced by rest_framework_gis, some fields may be absent
+                    if serializer.geo_fields:
+                        # Leave GeoModelSerializer generated fields untouched
+                        source = name
+                    else:
+                        raise key_error
+                # If the value is url, its source is *
                 if source is not '*':
                     # This is the magic line
                     name = source
-                print(str(name) + " now has the field " + str(field))
-                new_ser[name] = field
+                print(str(name) + " now has the value " + str(value))
+                new_ser[name] = value
             ret.append(new_ser)
         # If the serialization was not a list, also returns a bare serialization
         if not isinstance(serialization, list):
