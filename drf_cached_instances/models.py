@@ -166,7 +166,7 @@ class CachedQueryset(object):
         self.queryset = self.queryset & other.queryset
         return self
 
-    def _or_ (self, other):
+    def _or_(self, other):
         """Empty cached keys and join querysets.
         """
         self._primary_keys = None
