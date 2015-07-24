@@ -160,13 +160,13 @@ class CachedQueryset(object):
             pks = self.pks[key]
         return CachedQueryset(self.cache, self.queryset, pks)
 
-    def _and_(self, other):
+    def __and__(self, other):
         """Empty cached keys and join querysets. """
         self._primary_keys = None
         self.queryset = self.queryset & other.queryset
         return self
 
-    def _or_(self, other):
+    def __or__(self, other):
         """Empty cached keys and join querysets.
         """
         self._primary_keys = None
